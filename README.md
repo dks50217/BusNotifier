@@ -1,20 +1,28 @@
 # BusNotifier 公車到站提醒
 
-即時追蹤台灣公車到站時間，在公車快到站時推送瀏覽器通知與音效提醒。
+即時追蹤台灣公車到站時間，透過 **LINE Bot** 主動推播到站通知。
 
 ---
 
 ## 功能
 
-- **路線搜尋** — 依縣市 + 路線號碼查詢去程／回程站牌，支援全台 21 縣市
-- **即時 ETA** — 查詢結果每站顯示預估到站分鐘數，每 30 秒自動刷新
-  - 3 分鐘內 → 橙色警示
-  - 4–8 分鐘 → 黃色提醒
-  - 9 分鐘以上 → 藍色一般
-  - 即將進站 → 綠色閃爍
-- **自訂監控** — 可對任意站牌設定監控，公車進入 3 分鐘 / 2 站內時觸發提醒
-- **瀏覽器通知 + 音效** — 使用 Notification API 與 Web Audio API
-- **Mock 模式** — 無需 TDX 憑證即可在本機開發測試
+- **LINE Bot 推播** — 公車進入 3 分鐘 / 2 站內時，自動傳訊息通知
+- **多使用者** — 每位加入 Bot 的使用者可各自設定監控路線與站牌
+- **即時查詢** — 傳「查詢」即可取得目前所有監控站牌的 ETA
+- **網頁前台** — React SPA，可搜尋站牌、查看即時 ETA（需瀏覽器保持開啟）
+- **Mock 模式** — 無需 TDX 憑證即可在本機開發測試前台
+
+---
+
+## 架構
+
+```
+前台 (Vite + React)          後台 (Express + Node.js)
+─────────────────────        ──────────────────────────
+搜尋站牌 / 查看 ETA   ←→    LINE Webhook 接收指令
+（需瀏覽器開啟）             背景每 30 秒 poll TDX API
+                             快到站時 push LINE 訊息
+```
 
 ---
 
@@ -22,8 +30,9 @@
 
 | 類別 | 套件 |
 |------|------|
-| 框架 | React 18 + TypeScript |
-| 建構工具 | Vite 5 |
+| 前台框架 | React 18 + TypeScript + Vite 5 |
+| 後台框架 | Express 4 |
+| LINE 整合 | @line/bot-sdk v9 |
 | 狀態管理 | Zustand |
 | 資料請求 | Axios |
 | 樣式 | Tailwind CSS 3 |
@@ -34,99 +43,124 @@
 ## 事前準備
 
 - Node.js ≥ 18
-- TDX 帳號（免費註冊）：https://tdx.transportdata.tw/register
+- TDX 帳號（免費）：https://tdx.transportdata.tw/register
+- LINE Developers 帳號：https://developers.line.biz/
+- 具備 HTTPS 公開網址（Webhook 必要）
 
 ### 取得 TDX Client ID / Secret
 
 1. 登入 TDX → 右上角「會員中心」→「API 金鑰管理」
 2. 建立一組應用程式，複製 **Client ID** 與 **Client Secret**
 
+### 建立 LINE Messaging API Channel
+
+1. 登入 LINE Developers Console → 建立 Provider → 建立 **Messaging API** channel
+2. 進入 channel → **Messaging API** 頁籤
+3. 複製 **Channel secret**（Basic settings）與 **Channel access token**（Messaging API）
+4. 設定 Webhook URL：`https://你的網域/webhook`，並開啟「Use webhook」
+
 ---
 
-## 安裝與啟動
+## 安裝
 
 ```bash
-# 安裝依賴
 npm install
-
-# 複製環境變數範本並填入憑證
-cp .env.example .env
 ```
 
-編輯 `.env`：
+建立 `.env`：
 
 ```env
-# 切換為 false 以使用真實 TDX API
+# ── TDX API（前後台共用） ─────────────────────
 VITE_USE_MOCK=false
+VITE_TDX_CLIENT_ID=你的_tdx_client_id
+VITE_TDX_CLIENT_SECRET=你的_tdx_client_secret
 
-VITE_TDX_CLIENT_ID=你的_client_id
-VITE_TDX_CLIENT_SECRET=你的_client_secret
+# ── LINE Bot（後台） ──────────────────────────
+LINE_CHANNEL_SECRET=你的_line_channel_secret
+LINE_CHANNEL_ACCESS_TOKEN=你的_line_channel_access_token
+
+PORT=3000
 ```
 
-```bash
-# 啟動開發伺服器
-npm run dev
-```
-
-瀏覽器開啟 `http://localhost:5173`
-
-### 僅使用 Mock 資料（無需 TDX 帳號）
-
-```env
-VITE_USE_MOCK=true
-```
-
-Mock 模式會模擬公車逐漸靠近的 ETA 循環，每次 polling 減少 30 秒，歸零後重置。
+> TDX 金鑰只需填一份。`VITE_` 前綴讓前台 Vite bundle 能讀到；後台 server 會自動 fallback 讀取同一組變數。
 
 ---
 
-## 建置
+## 啟動
+
+### 後台 LINE Bot Server（主要服務）
 
 ```bash
-npm run build   # 輸出至 dist/
-npm run preview # 預覽 production build
+# 正式執行
+npm run server
+
+# 開發模式（檔案變更自動重啟）
+npm run server:dev
 ```
+
+Server 啟動後會同時：
+- 監聽 `POST /webhook` 接收 LINE 事件
+- 每 30 秒 poll TDX API，快到站時主動推播
+
+### 前台開發（選用）
+
+```bash
+npm run dev      # http://localhost:5173
+npm run build    # 輸出至 dist/
+```
+
+---
+
+## LINE Bot 指令
+
+| 傳給 Bot | 效果 |
+|----------|------|
+| `設定 台北市 307 去程 台北車站` | 開始監控指定站牌 |
+| `查詢` | 回報目前所有監控站牌的 ETA |
+| `停止 307 去程 台北車站` | 停止單一監控 |
+| `停止全部` | 清除所有監控 |
+| `說明` | 顯示指令說明 |
+
+**城市名稱**支援中文，例：台北市、新北市、台中市、高雄市⋯
 
 ---
 
 ## 專案結構
 
 ```
-src/
+src/                         # 前台 React SPA
 ├── api/
-│   ├── busService.ts   # fetchStops / fetchEta / fetchAllStopsEta
-│   ├── tdxClient.ts    # OAuth2 token + Axios instance
-│   └── mockData.ts     # Mock 站牌與 ETA 資料
-├── components/
-│   ├── AlertBanner/    # 監控中站牌的即時到站卡片
-│   ├── MonitorList/    # 已監控站牌列表
-│   ├── NotificationPermission/  # 通知權限提示橫幅
-│   ├── Search/         # 路線搜尋表單
-│   └── StopList/       # 站牌列表 + ETA 顯示
-├── hooks/
-│   ├── useBusPolling.ts  # 定時輪詢 + 警報觸發
-│   ├── useNotification.ts
-│   └── useAudio.ts
-├── store/
-│   └── useBusStore.ts  # Zustand：監控目標持久化至 localStorage
-├── types/
-│   └── bus.ts          # 所有型別定義
+│   ├── busService.ts        # fetchStops / fetchEta
+│   ├── tdxClient.ts         # OAuth2 token + Axios（Vite 環境）
+│   └── mockData.ts          # Mock 資料
+├── components/              # UI 元件
+├── hooks/                   # useBusPolling / useNotification / useAudio
+├── store/useBusStore.ts     # Zustand — 監控目標持久化至 localStorage
+├── types/bus.ts             # 共用型別（前後台共用）
 └── utils/
-    ├── cities.ts       # 縣市代碼對照表
-    └── localStorage.ts
+
+server/                      # 後台 Express + LINE Bot
+├── index.ts                 # 入口 — 掛載 webhook，啟動 poller
+├── webhook.ts               # LINE 事件處理 + 指令解析
+├── lineClient.ts            # LINE SDK client singleton
+├── busService.ts            # TDX API（Node 環境，process.env）
+├── userStore.ts             # 使用者設定讀寫（JSON 檔）
+├── poller.ts                # 背景輪詢 + 推播邏輯
+└── data/users.json          # 使用者資料（自動建立）
 ```
 
 ---
 
-## 環境變數一覽
+## 環境變數
 
-| 變數 | 預設值 | 說明 |
-|------|--------|------|
-| `VITE_USE_MOCK` | `true` | `false` 改用真實 TDX API |
-| `VITE_TDX_CLIENT_ID` | — | TDX OAuth2 Client ID |
-| `VITE_TDX_CLIENT_SECRET` | — | TDX OAuth2 Client Secret |
-
-> **注意**：`.env` 內容會打包進瀏覽器 bundle，請勿將 Secret 提交至公開 repo。
+| 變數 | 用途 |
+|------|------|
+| `VITE_USE_MOCK` | `true` 使用 mock 資料，`false` 呼叫真實 TDX |
+| `VITE_TDX_CLIENT_ID` | TDX Client ID（前後台共用） |
+| `VITE_TDX_CLIENT_SECRET` | TDX Client Secret（前後台共用） |
+| `LINE_CHANNEL_SECRET` | LINE Webhook 簽章驗證 |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE Push Message 授權 |
+| `PORT` | Server 監聽埠（預設 3000） |
 
 ---
 
