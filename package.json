@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@line/bot-sdk": "^9.4.0",
+    "openai": "^4.77.0",
     "axios": "^1.7.2",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",

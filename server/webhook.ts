@@ -3,7 +3,10 @@ import type { WebhookEvent } from '@line/bot-sdk'
 import { getLineClient } from './lineClient.js'
 import { addTarget, removeAllTargets, removeTarget, ensureUser, getUser } from './userStore.js'
 import { fetchStops, fetchEta } from './busService.js'
+import { handleAiMessage } from './aiHandler.js'
 import type { Direction } from '../src/types/bus.js'
+
+const IS_AI_MODE = process.env.BOT_MODE === 'ai'
 
 // ── City label → TDX city code ────────────────────────────────────────────────
 
@@ -34,7 +37,15 @@ const DIRECTION_MAP: Record<string, Direction> = {
   '回程': 1, '1': 1,
 }
 
-const HELP_TEXT = `🚌 公車提醒 Bot 使用說明
+const HELP_TEXT = IS_AI_MODE
+  ? `🚌 公車提醒 Bot（AI 模式）
+
+直接用自然語言告訴我你想做什麼，例如：
+• 我要監控307路去程在台北車站
+• 台北市299回程象山站幫我追蹤
+• 現在307多久到
+• 取消所有監控`
+  : `🚌 公車提醒 Bot 使用說明
 
 【設定監控】
 設定 {城市} {路線} {去程|回程} {站牌}
@@ -82,6 +93,18 @@ async function handleText(userId: string, text: string): Promise<void> {
     await reply(userId, HELP_TEXT)
     return
   }
+
+  if (IS_AI_MODE) {
+    try {
+      await reply(userId, await handleAiMessage(userId, text))
+    } catch (err) {
+      console.error('[aiHandler]', err)
+      await reply(userId, '⚠️ AI 處理失敗，請稍後再試。')
+    }
+    return
+  }
+
+  // ── Command mode ──────────────────────────────────────────────────────────
   if (text === '查詢') {
     await handleQuery(userId)
     return
