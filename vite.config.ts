@@ -11,13 +11,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      // API requests: /tdx-api/... → https://tdx.transportdata.tw/api/...
-      // Token uses the TDX URL directly (CORS allowed on token endpoint).
-      '/tdx-api': {
-        target: 'https://tdx.transportdata.tw',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/tdx-api/, '/api'),
-      },
+      '/api': { target: 'http://localhost:3000', changeOrigin: true },
     },
   },
 })

@@ -19,6 +19,7 @@ export interface UserTarget {
 export interface UserRecord {
   userId: string
   targets: UserTarget[]
+  history: unknown[]
 }
 
 type Store = Record<string, UserRecord>
@@ -33,10 +34,14 @@ function save(store: Store): void {
   writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf-8')
 }
 
+function ensureRecord(store: Store, userId: string): void {
+  if (!store[userId]) store[userId] = { userId, targets: [], history: [] }
+}
+
 export function ensureUser(userId: string): void {
   const store = load()
   if (!store[userId]) {
-    store[userId] = { userId, targets: [] }
+    store[userId] = { userId, targets: [], history: [] }
     save(store)
   }
 }
@@ -51,7 +56,7 @@ export function getAllUsers(): UserRecord[] {
 
 export function addTarget(userId: string, target: UserTarget): void {
   const store = load()
-  if (!store[userId]) store[userId] = { userId, targets: [] }
+  ensureRecord(store, userId)
   store[userId].targets = store[userId].targets.filter(t => t.id !== target.id)
   store[userId].targets.push(target)
   save(store)
@@ -72,4 +77,19 @@ export function removeAllTargets(userId: string): void {
     store[userId].targets = []
     save(store)
   }
+}
+
+export function getHistory(userId: string): unknown[] {
+  return load()[userId]?.history ?? []
+}
+
+export function saveHistory(userId: string, history: unknown[]): void {
+  const store = load()
+  ensureRecord(store, userId)
+  store[userId].history = history
+  save(store)
+}
+
+export function clearHistory(userId: string): void {
+  saveHistory(userId, [])
 }

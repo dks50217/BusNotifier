@@ -1,7 +1,7 @@
 import OpenAI from 'openai'
 import type { Direction } from '../src/types/bus.js'
-import { addTarget, removeTarget, removeAllTargets, getUser } from './userStore.js'
-import { fetchStops, fetchEta } from './busService.js'
+import { addTarget, removeTarget, removeAllTargets, getUser, getHistory, saveHistory, clearHistory } from './userStore.js'
+import { fetchStops, fetchEta, detectDirection } from './busService.js'
 
 const client = new OpenAI()  // reads OPENAI_API_KEY from env
 
@@ -35,8 +35,9 @@ const SYSTEM_PROMPT = `你是台灣公車到站提醒 Bot 的 AI 助理。你能
 規則：
 - 使用工具完成請求後，用繁體中文簡短回覆結果
 - 若工具回傳錯誤，說明原因並提供建議
-- 需要城市、路線、方向、站牌才能設定監控；若資訊不足，直接問使用者
-- 方向只有「去程」或「回程」兩種
+- 需要城市、路線、上車站牌才能設定監控；若資訊不足，一次把所有缺少的項目列出來問使用者，不要分多輪詢問
+- 若使用者提到目的地（例如「去淡水捷運」），請將目的地填入 destination，系統會自動判斷去程/回程，不需要問使用者
+- 只有在使用者沒有提到目的地時，才需要詢問去程或回程
 - 若使用者詢問與公車監控完全無關的事，回覆：「我只能協助公車到站監控，請問要設定哪條路線？」`
 
 // ── Tool definitions (OpenAI format) ─────────────────────────────────────────
@@ -46,16 +47,17 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'setup_monitoring',
-      description: '設定公車到站監控。使用者想追蹤某條路線在特定站牌的到站時間時呼叫。',
+      description: '設定公車到站監控。使用者想追蹤某條路線在特定站牌的到站時間時呼叫。提供 destination 時系統自動判斷方向，不需要填 direction。',
       parameters: {
         type: 'object',
         properties: {
-          city:      { type: 'string', description: '城市名稱，例如：台北市、新北市' },
-          routeName: { type: 'string', description: '路線號碼，例如：307、299' },
-          direction: { type: 'string', enum: ['去程', '回程'], description: '行駛方向' },
-          stopName:  { type: 'string', description: '站牌名稱，例如：台北車站' },
+          city:        { type: 'string', description: '城市名稱，例如：台北市、新北市' },
+          routeName:   { type: 'string', description: '路線號碼，例如：307、299' },
+          stopName:    { type: 'string', description: '上車站牌名稱，例如：台北車站' },
+          destination: { type: 'string', description: '目的地站牌名稱。提供後系統自動判斷去程/回程，優先使用此欄位' },
+          direction:   { type: 'string', enum: ['去程', '回程'], description: '行駛方向。僅在使用者明確說去程/回程且未提供 destination 時填入' },
         },
-        required: ['city', 'routeName', 'direction', 'stopName'],
+        required: ['city', 'routeName', 'stopName'],
       },
     },
   },
@@ -100,7 +102,7 @@ const STOP_RE  = /^[一-鿿 A-Za-z0-9()（）\-\/]{1,30}$/  // 站牌名最多 3
 
 function validateArgs(args: Record<string, string>): string | null {
   if (args.city    !== undefined && !CITY_MAP[args.city])            return `不支援的城市：${args.city}`
-  if (args.direction !== undefined && !DIRECTION_MAP[args.direction]) return '方向必須是「去程」或「回程」'
+  if (args.direction !== undefined && !(args.direction in DIRECTION_MAP)) return '方向必須是「去程」或「回程」'
   if (args.routeName !== undefined && !ROUTE_RE.test(args.routeName)) return '路線名稱格式不正確'
   if (args.stopName  !== undefined && !STOP_RE.test(args.stopName))   return '站牌名稱格式不正確'
   return null
@@ -114,9 +116,29 @@ async function executeTool(userId: string, name: string, args: Record<string, st
 
   if (name === 'setup_monitoring') {
     const city = CITY_MAP[args.city]
-    const direction = DIRECTION_MAP[args.direction]
     if (!city) return `錯誤：找不到城市「${args.city}」`
-    if (direction === undefined) return '錯誤：方向請填去程或回程'
+
+    // Auto-detect direction from destination
+    if (args.destination && !args.direction) {
+      const detected = await detectDirection(city, args.routeName, args.stopName, args.destination)
+      if (!detected) {
+        return `無法自動判斷方向：在 ${args.routeName} 路找不到從「${args.stopName}」到「${args.destination}」的路線，請直接告知去程或回程`
+      }
+      addTarget(userId, {
+        id: `${args.routeName}-${detected.direction}-${detected.boardingStopUID}`,
+        routeName: args.routeName,
+        direction: detected.direction,
+        stopUID: detected.boardingStopUID,
+        stopName: detected.boardingStopName,
+        city,
+      })
+      const dirLabel = detected.direction === 0 ? '去程' : '回程'
+      return `成功設定：${args.routeName}路 ${dirLabel} ${detected.boardingStopName}（往 ${args.destination} 方向）`
+    }
+
+    // Explicit direction flow
+    const direction = DIRECTION_MAP[args.direction]
+    if (direction === undefined) return '錯誤：請提供目的地或方向（去程/回程）'
 
     const stops = await fetchStops(city, args.routeName, direction)
     if (stops.length === 0) return `找不到 ${args.routeName}路 ${args.direction} 的站牌，請確認路線名稱與城市`
@@ -187,18 +209,26 @@ async function executeTool(userId: string, name: string, args: Record<string, st
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+const MAX_HISTORY = 20  // max messages kept per user (excludes system prompt)
 const MAX_INPUT_LENGTH = 200
+
+export { clearHistory }
 
 export async function handleAiMessage(userId: string, text: string): Promise<string> {
   if (text.length > MAX_INPUT_LENGTH) {
     return '訊息太長，請簡短描述你的需求（例如：監控307路去程台北車站）。'
   }
 
+  const history = getHistory(userId) as OpenAI.Chat.ChatCompletionMessageParam[]
+
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: 'system', content: SYSTEM_PROMPT },
+    ...history,
     // wrap in instruction tag to keep user content separate from operator instructions
     { role: 'user', content: `<user_message>${text}</user_message>` },
   ]
+
+  let reply = '發生錯誤，請稍後再試。'
 
   for (let i = 0; i < 5; i++) {
     const response = await client.chat.completions.create({
@@ -212,7 +242,8 @@ export async function handleAiMessage(userId: string, text: string): Promise<str
     messages.push(message)
 
     if (!message.tool_calls || message.tool_calls.length === 0) {
-      return message.content ?? '好的！'
+      reply = message.content ?? '好的！'
+      break
     }
 
     for (const call of message.tool_calls) {
@@ -222,5 +253,8 @@ export async function handleAiMessage(userId: string, text: string): Promise<str
     }
   }
 
-  return '發生錯誤，請稍後再試。'
+  // Persist history to disk (strip system prompt, keep last MAX_HISTORY messages)
+  saveHistory(userId, messages.slice(1).slice(-MAX_HISTORY))
+
+  return reply
 }

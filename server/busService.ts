@@ -60,6 +60,44 @@ export async function fetchStops(city: string, routeName: string, direction: Dir
     .sort((a, b) => a.sequence - b.sequence)
 }
 
+export interface DetectedDirection {
+  direction: Direction
+  boardingStopUID: string
+  boardingStopName: string
+}
+
+export async function detectDirection(
+  city: string,
+  routeName: string,
+  boardingStop: string,
+  destination: string,
+): Promise<DetectedDirection | null> {
+  const token = await getAccessToken()
+  const { data } = await axios.get<any[]>(
+    `${API_BASE}/basic/v2/Bus/StopOfRoute/City/${city}/${encodeURIComponent(routeName)}`,
+    { headers: { Authorization: `Bearer ${token}` }, params: { $format: 'JSON' } },
+  )
+
+  const match = (name: string, query: string) =>
+    name.includes(query) || query.includes(name)
+
+  for (const dirData of data) {
+    const direction: Direction = dirData.Direction
+    const stops: BusStop[] = (dirData.Stops as any[])
+      .map(s => ({ stopUID: s.StopUID, stopName: s.StopName.Zh_tw, sequence: s.StopSequence, direction, routeName }))
+      .sort((a, b) => a.sequence - b.sequence)
+
+    const boardingIdx = stops.findIndex(s => match(s.stopName, boardingStop))
+    const destIdx     = stops.findIndex(s => match(s.stopName, destination))
+
+    if (boardingIdx !== -1 && destIdx !== -1 && boardingIdx < destIdx) {
+      return { direction, boardingStopUID: stops[boardingIdx].stopUID, boardingStopName: stops[boardingIdx].stopName }
+    }
+  }
+
+  return null
+}
+
 export async function fetchEta(city: string, routeName: string, direction: Direction, stopUID: string): Promise<BusEta | null> {
   const token = await getAccessToken()
   const { data } = await axios.get<TdxEta[]>(
@@ -76,4 +114,13 @@ export async function fetchEta(city: string, routeName: string, direction: Direc
       return at - bt
     })
   return candidates.length > 0 ? normaliseTdxEta(candidates[0]) : null
+}
+
+export async function fetchAllEtas(city: string, routeName: string, direction: Direction): Promise<BusEta[]> {
+  const token = await getAccessToken()
+  const { data } = await axios.get<TdxEta[]>(
+    `${API_BASE}/basic/v2/Bus/EstimatedTimeOfArrival/City/${city}/${encodeURIComponent(routeName)}`,
+    { headers: { Authorization: `Bearer ${token}` }, params: { $format: 'JSON' } },
+  )
+  return data.filter(r => r.Direction === direction).map(normaliseTdxEta)
 }

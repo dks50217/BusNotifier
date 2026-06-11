@@ -8,10 +8,10 @@
 
 - **LINE Bot 推播** — 公車進入 3 分鐘 / 2 站內時，自動傳訊息通知
 - **多使用者** — 每位加入 Bot 的使用者可各自設定監控路線與站牌
-- **AI 模式** — 整合 OpenAI，讓使用者用自然語言設定監控，無需記憶指令格式
+- **AI 模式** — 整合 OpenAI，支援自然語言設定監控、記憶對話上下文、自動判斷去程/回程
 - **指令模式** — 使用固定指令快速操作
 - **即時查詢** — 隨時查詢目前所有監控站牌的 ETA
-- **網頁前台** — React SPA，可搜尋站牌、查看即時 ETA（需瀏覽器保持開啟）
+- **網頁前台** — React SPA，可搜尋站牌、查看即時 ETA
 - **Mock 模式** — 無需 TDX 憑證即可在本機開發測試前台
 
 ---
@@ -21,12 +21,15 @@
 ```
 前台 (Vite + React)          後台 (Express + Node.js)
 ─────────────────────        ──────────────────────────
-搜尋站牌 / 查看 ETA   ←→    LINE Webhook 接收指令
-（需瀏覽器開啟）             ├─ 指令模式：解析固定指令
-                             ├─ AI 模式：呼叫 OpenAI 解析自然語言
+搜尋站牌 / 查看 ETA   ←→    /api/bus/* TDX proxy
+（需瀏覽器開啟）             ├─ LINE Webhook 接收指令
+                             ├─ 指令模式：解析固定指令
+                             ├─ AI 模式：OpenAI function calling
                              ├─ 背景每 30 秒 poll TDX API
                              └─ 快到站時 push LINE 訊息
 ```
+
+TDX API 金鑰只存在後台，前台透過 `/api/bus/*` 向後台取資料，不直接接觸 TDX。
 
 ---
 
@@ -67,7 +70,9 @@
 
 ---
 
-## 安裝
+## 安裝與啟動
+
+### 本機開發
 
 ```bash
 npm install
@@ -76,52 +81,55 @@ npm install
 建立 `.env`：
 
 ```env
-# ── TDX API（前後台共用） ─────────────────────
-VITE_USE_MOCK=false
-VITE_TDX_CLIENT_ID=你的_tdx_client_id
-VITE_TDX_CLIENT_SECRET=你的_tdx_client_secret
+# ── 前台 build 設定 ────────────────────────────
+VITE_USE_MOCK=false          # true=mock 資料；false=真實 TDX
 
-# ── LINE Bot（後台） ──────────────────────────
+# ── TDX API（後台 runtime，不需 VITE_ 前綴） ──
+TDX_CLIENT_ID=你的_tdx_client_id
+TDX_CLIENT_SECRET=你的_tdx_client_secret
+
+# ── LINE Bot ───────────────────────────────────
 LINE_CHANNEL_SECRET=你的_line_channel_secret
 LINE_CHANNEL_ACCESS_TOKEN=你的_line_channel_access_token
 
-# ── 操作模式 ──────────────────────────────────
+# ── 操作模式 ───────────────────────────────────
 # command（預設）：使用固定指令
 # ai：使用自然語言，需填入 OPENAI_API_KEY
 BOT_MODE=command
 
-# ── OpenAI（BOT_MODE=ai 時必填） ─────────────
+# ── OpenAI（BOT_MODE=ai 時必填） ──────────────
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o-mini   # 預設 gpt-4o-mini
+OPENAI_MODEL=gpt-4o-mini
 
 PORT=3000
 ```
 
-> TDX 金鑰只需填一份。`VITE_` 前綴讓前台 Vite bundle 能讀到；後台 server 會自動 fallback 讀取同一組變數。
-
----
-
-## 啟動
-
-### 後台 LINE Bot Server（主要服務）
-
 ```bash
-# 正式執行
+# 啟動後台 LINE Bot Server
 npm run server
 
-# 開發模式（檔案變更自動重啟）
+# 開發模式（自動重啟）
 npm run server:dev
+
+# 前台開發（選用，需同時啟動後台）
+npm run dev      # http://localhost:5173
 ```
 
-Server 啟動後會同時：
-- 監聽 `POST /webhook` 接收 LINE 事件
-- 每 30 秒 poll TDX API，快到站時主動推播
-
-### 前台開發（選用）
+### Docker 部署
 
 ```bash
-npm run dev      # http://localhost:5173
-npm run build    # 輸出至 dist/
+# 建立 image（不含任何 secret）
+docker build --build-arg VITE_USE_MOCK=false -t bus-notifier .
+
+# 啟動容器，從 .env 注入所有 key
+docker run --env-file .env -p 3000:3000 bus-notifier
+
+# 或匯出 image 為 tar，搬到其他機器
+docker save bus-notifier -o bus-notifier.tar
+
+# 目標機器載入並啟動
+docker load -i bus-notifier.tar
+docker run --env-file .env -p 3000:3000 bus-notifier
 ```
 
 ---
@@ -132,14 +140,17 @@ npm run build    # 輸出至 dist/
 
 ### AI 模式（`BOT_MODE=ai`）
 
-直接用口語描述需求：
+直接用口語描述需求，Bot 會記住對話上下文，並自動判斷去程/回程：
 
 ```
-我要監控307路去程在台北車站
-台北市299回程象山站幫我追蹤
+我要搭新北市紅51從台北灣社區去淡水捷運
+台北市299象山站幫我追蹤（去哪裡？）→ 告知目的地即可自動設定
 現在307多久到
 取消所有監控
 ```
+
+> 若提到目的地，系統會自動比對站序判斷方向，無需說「去程」或「回程」。
+> 只有在完全未提及目的地時，才會詢問方向。
 
 ### 指令模式（`BOT_MODE=command`，預設）
 
@@ -158,8 +169,7 @@ npm run build    # 輸出至 dist/
 ```
 src/                         # 前台 React SPA
 ├── api/
-│   ├── busService.ts        # fetchStops / fetchEta
-│   ├── tdxClient.ts         # OAuth2 token + Axios（Vite 環境）
+│   ├── busService.ts        # fetchStops / fetchEta（打後台 /api/bus/*）
 │   └── mockData.ts          # Mock 資料
 ├── components/              # UI 元件
 ├── hooks/                   # useBusPolling / useNotification / useAudio
@@ -168,12 +178,12 @@ src/                         # 前台 React SPA
 └── utils/
 
 server/                      # 後台 Express + LINE Bot
-├── index.ts                 # 入口 — 掛載 webhook，啟動 poller
+├── index.ts                 # 入口 — webhook、/api/bus/* proxy、靜態檔案
 ├── webhook.ts               # LINE 事件處理 + 模式路由
-├── aiHandler.ts             # OpenAI function calling — 自然語言解析
+├── aiHandler.ts             # OpenAI function calling（含對話歷史）
 ├── lineClient.ts            # LINE SDK client singleton
-├── busService.ts            # TDX API（Node 環境，process.env）
-├── userStore.ts             # 使用者設定讀寫（JSON 檔，含 mode 欄位）
+├── busService.ts            # TDX API（含自動判斷方向 detectDirection）
+├── userStore.ts             # 使用者設定 + 對話歷史讀寫（JSON 檔）
 ├── poller.ts                # 背景輪詢 + 推播邏輯
 └── data/users.json          # 使用者資料（自動建立）
 ```
@@ -185,8 +195,8 @@ server/                      # 後台 Express + LINE Bot
 | 變數 | 必填 | 用途 |
 |------|------|------|
 | `VITE_USE_MOCK` | ✓ | `true` 使用 mock 資料，`false` 呼叫真實 TDX |
-| `VITE_TDX_CLIENT_ID` | ✓ | TDX Client ID（前後台共用） |
-| `VITE_TDX_CLIENT_SECRET` | ✓ | TDX Client Secret（前後台共用） |
+| `TDX_CLIENT_ID` | ✓ | TDX Client ID（後台） |
+| `TDX_CLIENT_SECRET` | ✓ | TDX Client Secret（後台） |
 | `LINE_CHANNEL_SECRET` | ✓ | LINE Webhook 簽章驗證 |
 | `LINE_CHANNEL_ACCESS_TOKEN` | ✓ | LINE Push Message 授權 |
 | `BOT_MODE` | — | `command`（預設）或 `ai` |
