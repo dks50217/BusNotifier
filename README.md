@@ -18,15 +18,49 @@
 
 ## 架構
 
-```
-前台 (Vite + React)          後台 (Express + Node.js)
-─────────────────────        ──────────────────────────
-搜尋站牌 / 查看 ETA   ←→    /api/bus/* TDX proxy
-（需瀏覽器開啟）             ├─ LINE Webhook 接收指令
-                             ├─ 指令模式：解析固定指令
-                             ├─ AI 模式：OpenAI function calling
-                             ├─ 背景每 30 秒 poll TDX API
-                             └─ 快到站時 push LINE 訊息
+```mermaid
+flowchart TD
+    User(["使用者"])
+    LINE["LINE App"]
+
+    subgraph Server["後台 Express :3000"]
+        Webhook["/webhook"]
+        Mode{BOT_MODE}
+        Cmd["指令模式\nwebhook.ts"]
+        AI["AI 模式\naiHandler.ts"]
+        Proxy["/api/bus/*"]
+        Bus["busService.ts"]
+        Store[("userStore.ts\nusers.json")]
+        Poller["poller.ts\n每 30 秒"]
+    end
+
+    subgraph Frontend["前台 React SPA"]
+        Web["網頁介面"]
+    end
+
+    TDX(["TDX API"])
+    OpenAI(["OpenAI API"])
+
+    User -->|傳訊息| LINE
+    LINE -->|"POST /webhook"| Webhook
+    Webhook --> Mode
+    Mode -->|command| Cmd
+    Mode -->|ai| AI
+    AI <-->|function calling| OpenAI
+    Cmd --> Store
+    AI --> Store
+    Cmd --> Bus
+    AI --> Bus
+    Bus <-->|"OAuth2 + REST"| TDX
+
+    Poller -->|讀取監控目標| Store
+    Poller --> Bus
+    Poller -->|"到站推播"| LINE
+    LINE -->|通知| User
+
+    User -->|開啟網頁| Web
+    Web -->|"/api/bus/*"| Proxy
+    Proxy --> Bus
 ```
 
 TDX API 金鑰只存在後台，前台透過 `/api/bus/*` 向後台取資料，不直接接觸 TDX。
