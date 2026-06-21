@@ -20,6 +20,7 @@ export interface UserRecord {
   userId: string
   targets: UserTarget[]
   history: unknown[]
+  historyAt?: number  // epoch ms, for TTL expiry
 }
 
 type Store = Record<string, UserRecord>
@@ -79,14 +80,20 @@ export function removeAllTargets(userId: string): void {
   }
 }
 
+const HISTORY_TTL_MS = 6 * 60 * 60 * 1000  // ponytail: 6h, tune if sessions run longer
+
 export function getHistory(userId: string): unknown[] {
-  return load()[userId]?.history ?? []
+  const record = load()[userId]
+  if (!record) return []
+  const expired = !record.historyAt || Date.now() - record.historyAt > HISTORY_TTL_MS
+  return expired ? [] : record.history
 }
 
 export function saveHistory(userId: string, history: unknown[]): void {
   const store = load()
   ensureRecord(store, userId)
   store[userId].history = history
+  store[userId].historyAt = Date.now()
   save(store)
 }
 
